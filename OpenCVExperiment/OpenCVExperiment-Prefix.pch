@@ -1,0 +1,26 @@
+//
+//  PrefixHeader.pch
+//  OpenCVExperiment
+//
+//  Created by Jose Miguel SN on 16/9/16.
+//  Copyright © 2016 Jose Miguel SN. All rights reserved.
+//
+
+//
+// Prefix header for all source files of the 'VideoFilters' target in the 'VideoFilters' project
+//
+
+#import <Availability.h>
+
+#ifndef __IPHONE_4_0
+#warning "This project uses features only available in iOS SDK 4.0 and later."
+#endif
+
+#ifdef __cplusplus
+#import <opencv2/opencv.hpp>
+#endif
+
+#ifdef __OBJC__
+#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
+#endif

@@ -8,6 +8,8 @@
 
 #import "ViewController.h"
 
+#import <opencv2/highgui/cap_ios.h>
+
 
 @interface ViewController ()
 
@@ -76,6 +78,7 @@ enum Operation{
   SOBEL,
   HOUGH,
   CAMPOS,
+  FACADE,
   NOP
 } currentOp = NOP;
 
@@ -99,7 +102,7 @@ enum Operation{
   }
 }
 
-void printMat(Mat& matrix, const std::string& name)
+void printMat(const Mat& matrix, const std::string& name)
 {
   printf("%s:\n", name.c_str());
   for(int j=0; j< matrix.rows; ++j)
@@ -112,21 +115,21 @@ void printMat(Mat& matrix, const std::string& name)
   }
 }
 /*
-void printf3Point( vector< vector< Point3f> > Points, string name)
-{
-  FILE * fp;
-  fp = fopen(name.c_str() ,"w");
-  for(int i=0; i< Points.size(); ++i)
-  {
-    for(int j=0; j< Points[i].size(); ++j)
-    {
-      fprintf(fp,"%lf %lf %lf\n", Points[i][j].x, Points[i][j].y, Points[i][j].z);
-    }
-    fprintf(fp,"\n");
-  }
-  fclose(fp);
-}
-*/
+ void printf3Point( vector< vector< Point3f> > Points, string name)
+ {
+ FILE * fp;
+ fp = fopen(name.c_str() ,"w");
+ for(int i=0; i< Points.size(); ++i)
+ {
+ for(int j=0; j< Points[i].size(); ++j)
+ {
+ fprintf(fp,"%lf %lf %lf\n", Points[i][j].x, Points[i][j].y, Points[i][j].z);
+ }
+ fprintf(fp,"\n");
+ }
+ fclose(fp);
+ }
+ */
 
 Mat intrinsic_Matrix(3,3, CV_64F); //We will try to refine the previous intrinsic camera matrix
 Mat distortion_coeffs(8,1, CV_64F);
@@ -138,6 +141,211 @@ bool isIntrinsicMatrixValid(const Mat& m){
   }
   return true;
 }
+
+//From UIImage to Mat
+- (cv::Mat)cvMatFromUIImage:(UIImage *)image
+{
+  CGColorSpaceRef colorSpace = CGImageGetColorSpace(image.CGImage);
+  CGFloat cols = image.size.width;
+  CGFloat rows = image.size.height;
+  
+  cv::Mat cvMat(rows, cols, CV_8UC4); // 8 bits per component, 4 channels (color channels + alpha)
+  
+  CGContextRef contextRef = CGBitmapContextCreate(cvMat.data,                 // Pointer to  data
+                                                  cols,                       // Width of bitmap
+                                                  rows,                       // Height of bitmap
+                                                  8,                          // Bits per component
+                                                  cvMat.step[0],              // Bytes per row
+                                                  colorSpace,                 // Colorspace
+                                                  kCGImageAlphaNoneSkipLast |
+                                                  kCGBitmapByteOrderDefault); // Bitmap info flags
+  
+  CGContextDrawImage(contextRef, CGRectMake(0, 0, cols, rows), image.CGImage);
+  CGContextRelease(contextRef);
+  
+  return cvMat;
+}
+
+//UIImage to grayscale Mat
+- (cv::Mat)cvMatGrayFromUIImage:(UIImage *)image
+{
+  CGColorSpaceRef colorSpace = CGImageGetColorSpace(image.CGImage);
+  CGFloat cols = image.size.width;
+  CGFloat rows = image.size.height;
+  
+  cv::Mat cvMat(rows, cols, CV_8UC1); // 8 bits per component, 1 channels
+  
+  CGContextRef contextRef = CGBitmapContextCreate(cvMat.data,                 // Pointer to data
+                                                  cols,                       // Width of bitmap
+                                                  rows,                       // Height of bitmap
+                                                  8,                          // Bits per component
+                                                  cvMat.step[0],              // Bytes per row
+                                                  colorSpace,                 // Colorspace
+                                                  kCGImageAlphaNoneSkipLast |
+                                                  kCGBitmapByteOrderDefault); // Bitmap info flags
+  
+  CGContextDrawImage(contextRef, CGRectMake(0, 0, cols, rows), image.CGImage);
+  CGContextRelease(contextRef);
+  
+  return cvMat;
+}
+
+-(void) drawPoints:(const std::vector<Point2f>&) points onImage:(Mat&) image{
+  for (int i = 0; i < points.size(); ++i){
+    printf("Corner: %f, %f\n", points[i].x, points[i].y);
+    cv::circle(image, points[i], 20, Scalar(255,0,0));
+  }
+}
+
+-(vector< Point3f>) objectPointsFromPatternImagePoints: (const vector<Point2f>&) points2D
+                                 withPatternObjectSize: (const cv::Size&) patternObjectSize
+                                  withPatternImageSize: (const cv::Size&) patternImageSize{
+  vector< Point3f> objectPoints;
+  for(int j=0; j< points2D.size(); ++j)
+  {
+    Point2f tImgPT;
+    Point3f tObjPT;
+    
+    double x = points2D[j].x / patternImageSize.width * patternObjectSize.width;
+    double y = points2D[j].y / patternImageSize.height * patternObjectSize.height;
+    double z = 0;
+    
+    objectPoints.push_back(Point3f(x,y,z));
+  }
+  return objectPoints;
+}
+
+-(Mat) readGrayJPEGWithName:(NSString*) name{
+  NSString* filePath = [[NSBundle mainBundle] pathForResource:name ofType:@"jpg"];
+  assert(filePath != nil);
+  UIImage* resImage = [UIImage imageWithContentsOfFile:filePath];
+  cv::Mat pattern = [self cvMatFromUIImage:resImage];
+  cvtColor(pattern, pattern, CV_RGB2GRAY);
+  return pattern;
+}
+
+
+
+-(void) facade:(Mat&) img{
+  
+  Mat facade = [self readGrayJPEGWithName:@"facade"];
+  Mat facadeInScene = [self readGrayJPEGWithName:@"facadeInScene"];
+  
+  cv::resize(facade, facade, cv::Size(400, 400));
+  cv::resize(facadeInScene, facadeInScene, cv::Size(400, 400));
+  
+  //facade = [self hough:facade];
+  //facadeInScene = [self hough:facadeInScene];
+  
+  
+  //Facade
+  cv::OrbFeatureDetector featDet;
+  vector<cv::KeyPoint> keypointsObj;
+  featDet.detect(facade, keypointsObj);
+  cv::OrbDescriptorExtractor descExt;
+  cv::Mat descObject;
+  descExt.compute(facade, keypointsObj, descObject);
+  printf("Facade descriptors %d\n", descObject.size[0]);
+  
+  //Facade in scene
+  vector<cv::KeyPoint> keypointsScene;
+  featDet.detect(facadeInScene, keypointsScene);
+  cv::Mat descScene;
+  descExt.compute(facade, keypointsScene, descScene);
+  printf("Facade in scene descriptors %d\n", descScene.size[0]);
+  
+  //Finding matches
+  FlannBasedMatcher flann;
+  vector<cv::DMatch> matches;
+  descObject.convertTo(descObject, CV_32F); //Correct format
+  descScene.convertTo(descScene, CV_32F);
+  
+  //flann.match(descObject, descScene, matches);
+  flann.match(descObject, descScene, matches);
+  
+  //-- Quick calculation of max and min distances between keypoints
+  double min_dist = 99999999.0, max_dist = 0.0;
+  for( int i = 0; i < descObject.rows; i++ ){
+    cv::DMatch match = matches[i];
+    double dist = match.distance;
+    if( dist < min_dist ) min_dist = dist;
+    if( dist > max_dist ) max_dist = dist;
+  }
+  
+  printf("-- Max dist : %f \n", max_dist );
+  printf("-- Min dist : %f \n", min_dist );
+  
+  std::vector< DMatch > good_matches;
+  
+  for( int i = 0; i < descObject.rows; i++ ){
+    if( matches[i].distance < 1.6*min_dist ){
+      good_matches.push_back( matches[i]);
+    }
+  }
+  
+  
+  
+  //-- Localize the object
+  std::vector<Point2f> obj;
+  std::vector<Point2f> scene;
+  
+  for( int i = 0; i < good_matches.size(); i++ )
+  {
+    //-- Get the keypoints from the good matches
+    obj.push_back( keypointsObj[ good_matches[i].queryIdx ].pt );
+    scene.push_back( keypointsScene[ good_matches[i].trainIdx ].pt );
+  }
+  
+  Mat H = findHomography( obj, scene, CV_RANSAC );
+  
+  std::vector<Point2f> boundsOfFacadeObj;
+  boundsOfFacadeObj.push_back(Point2f(0,0));
+  boundsOfFacadeObj.push_back(Point2f(399,0));
+  
+  std::vector<Point2f> boundsOfFacadeScene;
+  
+  cv::perspectiveTransform(boundsOfFacadeObj, boundsOfFacadeScene, H);
+  
+  for (int i = 0; i < boundsOfFacadeScene.size(); ++i){
+    cv::circle(facadeInScene, boundsOfFacadeScene[i], 20, Scalar(255,0,0));
+  }
+  img = facadeInScene;
+  
+  if (true){
+    Mat img_matches;
+    drawMatches( facade, keypointsObj, facadeInScene, keypointsScene,
+                good_matches, img_matches, Scalar::all(-1), Scalar::all(-1),
+                vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS );
+    img = img_matches;
+  }
+  
+  /*
+   std::vector< cv::Point2f > corners;
+   int maxCorners = 10;
+   double qualityLevel = 0.01;
+   double minDistance = 200.0;
+   cv::goodFeaturesToTrack(pattern, corners, maxCorners, qualityLevel, minDistance);
+   printf("%lu\n", corners.size());
+   
+   cv::Size imageSize = cv::Size(pattern.cols, pattern.rows);
+   
+   vector< Point3f> objectPoints = [self objectPointsFromPatterImagePoints:corners
+   withPatternObjectSize:cv::Size(10,10) //Facade of 10x10 meters
+   withPatternImageSize:imageSize];
+   
+   cvtColor(pattern, pattern, CV_GRAY2RGB);
+   
+   vector< Mat> rvecs, tvecs;
+   calibrateCamera(objectPoints, corners, imageSize, intrinsic_Matrix, distortion_coeffs, rvecs, tvecs);
+   
+   [self drawPoints:corners onImage:pattern];
+   
+   img = pattern;
+   */
+  
+}
+
+
 
 -(void) estimateCameraPosition:(Mat&) img{
   
@@ -156,7 +364,7 @@ bool isIntrinsicMatrixValid(const Mat& m){
   //if find corner success, then
   if(sCorner)
   {
-
+    
     printf("CORNERS FOUND: %lu\n", corners.size());
     if (false){
       drawChessboardCorners(img, cv::Size(board_w, board_h), corners, sCorner);
@@ -292,14 +500,16 @@ bool isIntrinsicMatrixValid(const Mat& m){
   
 }
 
--(void) invertImage:(Mat&) image{
+-(Mat) invertImage:(Mat&) image{
   // Do some OpenCV stuff with the image
   Mat image_copy;
   cvtColor(image, image_copy, CV_BGRA2BGR);
   
   // invert image
   bitwise_not(image_copy, image_copy);
-  cvtColor(image_copy, image, CV_BGR2BGRA);
+  cvtColor(image_copy, image_copy, CV_BGR2BGRA);
+  
+  return image_copy;
 }
 
 -(void) sobel:(Mat&) image{
@@ -330,7 +540,7 @@ bool isIntrinsicMatrixValid(const Mat& m){
   addWeighted( abs_grad_x, 0.5, abs_grad_y, 0.5, 0, image );
 }
 
--(void) hough:(Mat&) image{
+-(Mat) hough:(const Mat&) image{
   Mat dst, cdst;
   Canny(image, dst, 50, 200, 3);
   cvtColor(dst, cdst, CV_GRAY2BGR);
@@ -361,7 +571,7 @@ bool isIntrinsicMatrixValid(const Mat& m){
   }
 #endif
   
-  image = cdst;
+  return cdst;
 }
 
 
@@ -372,7 +582,7 @@ bool isIntrinsicMatrixValid(const Mat& m){
   switch(currentOp){
     case INVERT:{
       self.videoCamera.defaultFPS = 30;
-      [self invertImage:image];
+      image = [self invertImage:image];
       break;
     }
     case SOBEL:{
@@ -382,12 +592,17 @@ bool isIntrinsicMatrixValid(const Mat& m){
     }
     case HOUGH:{
       self.videoCamera.defaultFPS = 30;
-      [self hough:image];
+      image = [self hough:image];
       break;
     }
     case CAMPOS:{
-      self.videoCamera.defaultFPS = 1;
+      self.videoCamera.defaultFPS = 30;
       [self estimateCameraPosition:image];
+      break;
+    }
+    case FACADE:{
+      self.videoCamera.defaultFPS = 30;
+      [self facade:image];
       break;
     }
     case NOP:
